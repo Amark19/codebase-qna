@@ -1,5 +1,5 @@
 """
-Ask questions about an indexed codebase using RAG + Claude.
+Ask questions about an indexed codebase using RAG + OpenAI ChatGPT.
 
 Usage:
     python query.py "How does authentication work in this repo?"
@@ -11,31 +11,39 @@ import argparse
 import os
 import chromadb
 from tfidf_embeddings import TfidfEmbeddingFunction
-import anthropic
+from openai import OpenAI
 
 
 def retrieve(question, collection_name="codebase", k=5):
     client = chromadb.PersistentClient(path="./chroma_db")
 
     tfidf_path = os.path.join("chroma_db", f"{collection_name}_tfidf.pkl")
+    print(f"[debug] Looking for TF-IDF model at: {tfidf_path}")
+    print(f"[debug] File exists: {os.path.exists(tfidf_path)}")
+
     if not os.path.exists(tfidf_path):
         print(f"No TF-IDF model found for collection '{collection_name}'. Run index_repo.py first.")
         sys.exit(1)
+
     embedding_fn = TfidfEmbeddingFunction.load(tfidf_path)
+    print(f"[debug] TF-IDF model loaded")
 
     try:
         collection = client.get_collection(
             name=collection_name,
             embedding_function=embedding_fn,
         )
-    except Exception:
+        print(f"[debug] Collection found, doc count: {collection.count()}")
+    except Exception as e:
         print(f"Collection '{collection_name}' not found. Run index_repo.py first.")
+        print(f"[debug] Exception: {e}")
         sys.exit(1)
 
     results = collection.query(
         query_texts=[question],
         n_results=k,
     )
+    print(f"[debug] Query returned {len(results['documents'][0])} chunks")
 
     docs = results["documents"][0]
     metas = results["metadatas"][0]
@@ -51,6 +59,7 @@ def build_prompt(question, retrieved_chunks):
         context_blocks.append(f"{header}\n{doc}")
 
     context = "\n\n".join(context_blocks)
+    print(f"Context {context}")
 
     prompt = f"""You are a helpful assistant answering questions about a codebase.
 Use ONLY the following code context to answer the question. If the context
@@ -67,15 +76,21 @@ ANSWER:"""
     return prompt
 
 
-def ask_claude(prompt):
-    client = anthropic.Anthropic()  # reads ANTHROPIC_API_KEY from env
-    response = client.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=1024,
-        messages=[{"role": "user", "content": prompt}],
-    )
-    return response.content[0].text
-
+def ask_chatgpt(prompt):
+    client = OpenAI()
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {"role": "system", "content": "You are a helpful assistant that answers questions about codebases."},
+                {"role": "user", "content": prompt},
+            ],
+            max_tokens=1024,
+        )
+        return response.choices[0].message.content
+    except Exception as e:
+        print(f"[debug] OpenAI error: {type(e).__name__}: {e}")
+        sys.exit(1)
 
 def main():
     parser = argparse.ArgumentParser()
@@ -85,7 +100,7 @@ def main():
     parser.add_argument("--show-chunks", action="store_true", help="Print retrieved chunks before the answer")
     args = parser.parse_args()
 
-    print(f"Searching for relevant code...\n")
+    print("Searching for relevant code...\n")
     retrieved = retrieve(args.question, args.collection, args.k)
 
     if args.show_chunks:
@@ -101,8 +116,8 @@ def main():
 
     prompt = build_prompt(args.question, retrieved)
 
-    print("\nAsking Claude...\n")
-    answer = ask_claude(prompt)
+    print("\nAsking ChatGPT...\n")
+    answer = ask_chatgpt(prompt)          # ← this was missing
 
     print("=" * 60)
     print(answer)
